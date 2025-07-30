@@ -1,54 +1,96 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report
 import pickle
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Load your data (replace with actual path if needed)
-df = pd.read_csv("C:\\Users\\lenovo\\OneDrive\\Desktop\\budget_data.csv")
+# Load model and resources
+@st.cache_resource
+def load_model():
+    with open("model.pkl", "rb") as f:
+        model = pickle.load(f)
+    with open("label_encoder.pkl", "rb") as f:
+        le = pickle.load(f)
+    with open("feature_names.pkl", "rb") as f:
+        features = pickle.load(f)
+    return model, le, features
 
-# Process the data
-df["Date"] = pd.to_datetime(df["Date"])
-monthly_summary = (
-    df.groupby([df["Date"].dt.to_period("M"), "Type"])["Amount"]
-    .sum()
-    .unstack(fill_value=0)
-    .reset_index()
-    .rename(columns={"Income": "Total_Income", "Expense": "Total_Expenses"})
-)
-monthly_summary["Savings"] = monthly_summary["Total_Income"] - monthly_summary["Total_Expenses"]
-monthly_summary["Expense_to_Income_Ratio"] = (
-    monthly_summary["Total_Expenses"] / monthly_summary["Total_Income"].replace(0, np.nan)
-).fillna(0)
-monthly_summary["Outcome"] = (monthly_summary["Savings"] / monthly_summary["Total_Income"]) >= 0.10
-monthly_summary["Outcome"] = monthly_summary["Outcome"].map({True: "Stable", False: "Unstable"})
+model, le, feature_names = load_model()
 
-# Prepare features
-processed_df = monthly_summary[[
-    "Total_Income", "Total_Expenses", "Savings", "Expense_to_Income_Ratio", "Outcome"
-]]
-le = LabelEncoder()
-processed_df["Outcome_encoded"] = le.fit_transform(processed_df["Outcome"])
+# App Title
+st.title("📊 Personal Finance Stability Predictor")
 
-X = processed_df[["Total_Income", "Total_Expenses", "Savings", "Expense_to_Income_Ratio"]]
-y = processed_df["Outcome_encoded"]
+st.write("""
+This app predicts whether your monthly financial situation is **Stable** or **Unstable** 
+based on your income, expenses, and savings.
+""")
 
-# Split and train
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-model = RandomForestClassifier(random_state=42)
-model.fit(X_train, y_train)
+# -------------------------------
+# Single Prediction Input Section
+# -------------------------------
+st.header("🔍 Single Prediction")
 
-# Evaluate
-print(classification_report(y_test, model.predict(X_test), target_names=le.classes_))
+with st.form("single_pred_form"):
+    total_income = st.number_input("Total Monthly Income", min_value=0.0, step=100.0)
+    total_expenses = st.number_input("Total Monthly Expenses", min_value=0.0, step=100.0)
+    savings = total_income - total_expenses
+    ratio = total_expenses / total_income if total_income > 0 else 0.0
 
-# Save everything
-with open("model.pkl", "wb") as f:
-    pickle.dump(model, f)
-with open("label_encoder.pkl", "wb") as f:
-    pickle.dump(le, f)
-with open("feature_names.pkl", "wb") as f:
-    pickle.dump(X.columns.tolist(), f)
+    submitted = st.form_submit_button("Predict")
 
-print("✅ Model, encoder, and feature names saved!")
+    if submitted:
+        input_data = pd.DataFrame([[
+            total_income, total_expenses, savings, ratio
+        ]], columns=feature_names)
+
+        prediction = model.predict(input_data)[0]
+        prob = model.predict_proba(input_data)[0][prediction]
+
+        result = le.inverse_transform([prediction])[0]
+        st.success(f"**Prediction: {result}**")
+        st.info(f"Confidence: {prob:.2%}")
+
+# -------------------------------
+# Batch Prediction Section
+# -------------------------------
+st.header("📁 Batch Prediction")
+
+uploaded_file = st.file_uploader("Upload a CSV file with 'Date', 'Type', 'Amount'", type=["csv"])
+
+if uploaded_file is not None:
+    try:
+        df = pd.read_csv(uploaded_file)
+        df["Date"] = pd.to_datetime(df["Date"])
+        monthly_summary = (
+            df.groupby([df["Date"].dt.to_period("M"), "Type"])["Amount"]
+            .sum()
+            .unstack(fill_value=0)
+            .reset_index()
+            .rename(columns={"Income": "Total_Income", "Expense": "Total_Expenses"})
+        )
+        monthly_summary["Savings"] = monthly_summary["Total_Income"] - monthly_summary["Total_Expenses"]
+        monthly_summary["Expense_to_Income_Ratio"] = (
+            monthly_summary["Total_Expenses"] / monthly_summary["Total_Income"].replace(0, np.nan)
+        ).fillna(0)
+
+        input_data = monthly_summary[feature_names]
+        predictions = model.predict(input_data)
+        prediction_labels = le.inverse_transform(predictions)
+        monthly_summary["Prediction"] = prediction_labels
+
+        st.subheader("📃 Prediction Results")
+        st.dataframe(monthly_summary)
+
+        # Download CSV
+        csv_download = monthly_summary.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Predictions", csv_download, file_name="predictions.csv")
+
+        # Visualization
+        st.subheader("📊 Prediction Distribution")
+        fig, ax = plt.subplots()
+        sns.countplot(x="Prediction", data=monthly_summary, palette="Set2", ax=ax)
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.error(f"Something went wrong: {e}")
